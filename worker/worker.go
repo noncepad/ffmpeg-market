@@ -6,7 +6,7 @@ import (
 )
 
 type Job struct {
-	ctx     context.Context
+	Ctx     context.Context
 	Blender string   // filepath
 	Out     []string // list of file extensions
 	ResultC chan<- Result
