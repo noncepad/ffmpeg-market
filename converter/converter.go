@@ -10,6 +10,7 @@ import (
 type Converter interface {
 	// takes an mp4 inputfile and converts it to a gif output file
 	Convert(ctx context.Context, inputFile, outputFile string) error
+	Render(ctx context.Context, inputFile, outputFile string) error
 }
 
 type simpleConverter struct {
@@ -32,7 +33,7 @@ func CreateSimpleConverter(ctx context.Context, config *Configuration) (Converte
 // ctx is for the user request.
 func (sc *simpleConverter) Convert(ctx context.Context, inputFile, outputFile string) error {
 	// use create to make sure we are not overwriting a file
-	// the command will cail if the output file already exists
+	// the command will fail if the output file already exists
 	saveFileHandle, err := os.Create(outputFile)
 	if err != nil {
 		return err
@@ -52,5 +53,28 @@ func (sc *simpleConverter) Convert(ctx context.Context, inputFile, outputFile st
 	}
 
 	fmt.Println("Conversion successful")
+	return cmd.Wait()
+}
+func (sc *simpleConverter) Render(ctx context.Context, inputFile, outputFile string) error {
+	// use create to make sure we are not overwriting a file
+	// the command will fail if the output file already exists
+	saveFileHandle, err := os.Create(outputFile)
+	if err != nil {
+		return err
+	}
+	// This command is not working, i am trying to find the right one
+	// blender -b ./files/solpop.blend -o ./files/solpop.avi -F AVIJPEG -x 1 -f 1 -a
+	cmd := exec.CommandContext(ctx, "blender", "--b", inputFile, "-out", outputFile, "-F", "AVIJPEG", "-x", "1", "-f", "1", "-a")
+
+	// redirect stdout to the save handle
+	cmd.Stdout = saveFileHandle
+	cmd.Stderr = os.Stderr
+	err = cmd.Start()
+	if err != nil {
+		err = fmt.Errorf("blender command failed: %v", err)
+		return err
+	}
+
+	fmt.Println("Rendering successful")
 	return cmd.Wait()
 }
