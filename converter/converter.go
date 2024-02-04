@@ -50,9 +50,25 @@ func (sc *simpleConverter) Convert(ctx context.Context, inputFile string, ext st
 		return nil, err
 	}
 
-	fmt.Println("Conversion successful")
-	return saveHandle, cmd.Wait()
+	// conversion is complete when we close the PipeReader
+	// let the command execute in the background
+	// use the saveHandle to read stdout from the command while in the foreground
+	go loopCloseWithError(cmd, saveHandle)
+	return saveHandle, nil
 }
+
+func loopCloseWithError(
+	cmd *exec.Cmd,
+	saveHandle *io.PipeReader,
+) {
+	err := cmd.Wait()
+	if err != nil {
+		saveHandle.CloseWithError(err)
+	} else {
+		saveHandle.Close()
+	}
+}
+
 func (sc *simpleConverter) Render(ctx context.Context, inputFile, outputFile string) error {
 	// use create to make sure we are not overwriting a file
 	// the command will fail if the output file already exists
@@ -61,7 +77,7 @@ func (sc *simpleConverter) Render(ctx context.Context, inputFile, outputFile str
 		return err
 	}
 	// blender -b ./files/solpop.blend -o ./files/solpop.avi -F AVIJPEG -x 1 -f 1 -a
-	cmd := exec.CommandContext(ctx, "blender", "--b", inputFile, "-out", outputFile, "-F", "AVIJPEG", "-x", "1", "-f", "1", "-a")
+	cmd := exec.CommandContext(ctx, "blender", "-b", inputFile, "-o", outputFile, "-F", "AVIJPEG", "-x", "1", "-f", "1", "-a")
 
 	// redirect stdout to the save handle
 	cmd.Stdout = saveFileHandle

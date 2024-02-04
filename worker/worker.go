@@ -46,6 +46,7 @@ func (sw *simpleWorker) Run(job Job) Result {
 	if err != nil {
 		return Result{Reader: nil, Err: err}
 	}
+
 	// Define an array of file handles (Reader)
 	readerList := make([]io.ReadCloser, len(job.Out))
 

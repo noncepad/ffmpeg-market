@@ -2,6 +2,7 @@ package converter_test
 
 import (
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"testing"
@@ -37,7 +38,8 @@ func TestConvert(t *testing.T) {
 	// Define input and output file paths
 	// inputfile must exist, outputfile must not exist
 	inputFile := "../files/solpipe.mp4"
-	outputFile := "../files/solpipe2.gif"
+	ext := "gif"
+	outputFile := "../files/solpipe." + ext
 
 	// Create a simple converter instance
 	ctx := context.Background()
@@ -50,9 +52,23 @@ func TestConvert(t *testing.T) {
 	}
 
 	// Call the Convert function
-	err = converter.Convert(ctx, inputFile, outputFile)
+	outputReader, err2 := converter.Convert(ctx, inputFile, ext)
+	if err2 != nil {
+		t.Fatalf("Convert function returned an error: %v", err)
+	}
+	// you want to copy to disk, not memory, so we do not use ReadAll (but you are on the right track)
+	//_, err = io.ReadAll(outputReader)
+	f, err := os.Create(outputFile)
 	if err != nil {
-		t.Errorf("Convert function returned an error: %v", err)
+		t.Fatalf("Failed to read output: %v", err)
+	}
+	// the secret trick is here:
+	_, err = io.Copy(f, outputReader)
+	if err != io.EOF {
+		err = nil
+	}
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	// Check if the output file exists
