@@ -20,6 +20,8 @@ type simpleConverter struct {
 }
 
 type Configuration struct {
+	BinFfmpeg  string
+	BinBlender string
 }
 
 func CreateSimpleConverter(ctx context.Context, config *Configuration) (Converter, error) {
@@ -39,7 +41,7 @@ func (sc *simpleConverter) Convert(ctx context.Context, inputFile string, ext st
 
 	// OLD: ffmpeg -i ./files/solpipe.mkv ./files/solpipe2.gif
 	// new: ffmpeg -i ./files/solpipe.mp4 -f gif pipe:1 > ./files/solpipe5.gif
-	cmd := exec.CommandContext(ctx, "ffmpeg", "-i", inputFile, "-f", ext, "pipe:1")
+	cmd := exec.CommandContext(ctx, sc.config.BinFfmpeg, "-i", inputFile, "-f", ext, "pipe:1")
 
 	// redirect stdout to the save handle
 	cmd.Stdout = stdout
@@ -77,7 +79,7 @@ func (sc *simpleConverter) Render(ctx context.Context, inputFile, outputFile str
 		return err
 	}
 	// blender -b ./files/solpop.blend -o ./files/solpop.avi -F AVIJPEG -x 1 -f 1 -a
-	cmd := exec.CommandContext(ctx, "blender", "-b", inputFile, "-o", outputFile, "-F", "AVIJPEG", "-x", "1", "-f", "1", "-a")
+	cmd := exec.CommandContext(ctx, sc.config.BinBlender, "-b", inputFile, "-o", outputFile, "-F", "AVIJPEG", "-x", "1", "-f", "1", "-a")
 
 	// redirect stdout to the save handle
 	cmd.Stdout = saveFileHandle
