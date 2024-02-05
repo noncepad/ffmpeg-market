@@ -107,7 +107,6 @@ func loopDoJob(w worker.Worker, jobC <-chan worker.Job, cancel context.CancelFun
 	signalC := w.CloseSignal()
 out:
 	for {
-		log.Printf("blocking here")
 		select {
 		// we read from signalC and get an error and put t in the err variable
 		case err = <-signalC:
