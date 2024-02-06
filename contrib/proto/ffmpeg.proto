@@ -1,0 +1,55 @@
+syntax = "proto3";
+
+package ffmpeg;
+
+option go_package = "gitlab.noncepad.com/naomiyoko/ffmpeg-market/proto/ffmpeg";
+
+// Result message used to send error if occurred.
+message Result {
+  string error = 1; // Error message if any occurred, empty if no error.
+}
+
+// File represents a stream of bytes which would be the equivalent of an io.ReadCloser in protobuf.
+message File {
+  bytes content = 1; // The contents of the file as a byte array since streaming isn't natively supported.
+}
+
+// Job message struct to be sent over the network.
+message Job {
+  string blender = 1; // Equivalent of Blender filepath.
+  repeated string out = 2; // List of file extensions.
+}
+
+message ProcessRequest{
+  oneof data{
+    ProcessArgs args = 1;
+    TargetMeta meta = 2;
+    TargetBlob blob = 3;
+  }
+}
+
+message ProcessArgs{
+  repeated string extension_list = 1;
+}
+
+message TargetMeta{
+    uint64 size = 1;
+    string extension = 2;
+}
+
+// for uploading a file
+message TargetBlob{
+    bytes data= 1;
+}
+
+// for downloading files by extension
+message ProcessResponse{
+    string extenstion=1;
+    bytes data=2;
+}
+
+// Service that could represent your manager's job handling.
+service JobManager {
+  // Streamed SendJob rpc call that returns a stream of File messages.
+  rpc Process (stream ProcessRequest) returns (stream ProcessResponse);
+}
