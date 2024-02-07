@@ -141,6 +141,7 @@ func loopProcessWrite(
 	reader io.ReadCloser,
 	writer io.Writer,
 ) {
+	defer reader.Close()
 	_, err := io.Copy(writer, reader)
 	// we must inform the Process function when we finish our task
 	errorC <- err
