@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"syscall"
 
 	pbf "gitlab.noncepad.com/naomiyoko/ffmpeg-market/proto/ffmpeg"
 	"google.golang.org/grpc"
@@ -105,15 +104,8 @@ func loopReadProcess(
 ) {
 	doneC := ctx.Done()
 	// Create the named pipe
-	err := syscall.Mkfifo(sourceFilePath, 0600)
-	if err != nil {
-		select {
-		case <-doneC:
-		case errorC <- fmt.Errorf("error creating named pipe - 1: %s", err):
-		}
-		return
-	}
-	writeFileHandle, err := os.Open(sourceFilePath)
+
+	writeFileHandle, err := os.Create(sourceFilePath)
 	if err != nil {
 		select {
 		case <-doneC:
@@ -121,6 +113,7 @@ func loopReadProcess(
 		}
 		return
 	}
+	defer writeFileHandle.Close()
 	_, err = io.Copy(writeFileHandle, blobReader)
 	if err != nil {
 		select {

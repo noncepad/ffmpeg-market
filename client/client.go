@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 
 	pbf "gitlab.noncepad.com/naomiyoko/ffmpeg-market/proto/ffmpeg"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 type Client interface {
@@ -19,12 +21,95 @@ type external struct {
 	client pbf.JobManagerClient
 }
 
+// host:port
+// args: 0=url string, 1=fileIn string, 2=DirOut string, 3=ext []string
+func Run(parentCtx context.Context, args []string) error {
+
+	// Check if the output directory exists
+	if _, err := os.Stat(args[2]); os.IsNotExist(err) {
+		return fmt.Errorf("Run - 1: output directory does not exist, err: %s", err)
+	}
+
+	// Create a client
+	ctx, cancel := context.WithCancel(parentCtx)
+	defer cancel()
+	doneC := ctx.Done()
+	conn, err := grpc.DialContext(ctx, args[0], grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return err
+	}
+	client := Create(ctx, conn)
+	blenderIn := args[1]
+	dir := args[2]
+	extList := args[3:]
+	readerList, err := client.ProcessRequest(ctx, blenderIn, extList)
+	errorC := make(chan error, len(args[4:]))
+	if err != nil {
+		return err
+	}
+	for i, reader := range readerList {
+		f, err := os.Create(fmt.Sprintf("%s/out.%s", dir, extList[i]))
+		if err != nil {
+			return err
+		}
+		log.Printf("Run - 2: Starting goroutine for writing %s\n", f.Name())
+		go loopWriteFile(ctx, errorC, f, reader)
+	}
+out:
+	for i := 0; i < len(readerList); i++ {
+		select {
+		case <-doneC:
+			err = ctx.Err()
+			break out
+		case err = <-errorC:
+			if err != nil {
+				break out
+			}
+		}
+	}
+	return err
+}
+
+func loopWriteFile(ctx context.Context, errorC chan<- error, fileOut io.WriteCloser, reader io.ReadCloser) {
+	_, err := io.Copy(fileOut, reader)
+
+	select {
+	case <-ctx.Done():
+	case errorC <- err:
+	}
+
+}
+
 func Create(ctx context.Context, conn *grpc.ClientConn) Client {
 	// Create a new gRPC client
 	return external{client: pbf.NewJobManagerClient(conn)}
 }
 
 func (e external) ProcessRequest(parentCtx context.Context, blender string, extenstionList []string) ([]io.ReadCloser, error) {
+	// Check if the file exists and has the correct extension
+	if _, err := os.Stat(blender); os.IsNotExist(err) {
+		return nil, fmt.Errorf("ProcessRequest - 1: file does not exist, err: %s", err)
+	} else if filepath.Ext(blender) != ".blend" {
+		return nil, fmt.Errorf("Process Request - 2: file must have .blend extension, err %s", err)
+	}
+
+	// check if file extenstions are compatible with ffmpeg
+	var supportedExtensions = map[string]bool{
+		"mp4":  true,
+		"mov":  true,
+		"mkv":  true,
+		"flv":  true,
+		"wmv":  true,
+		"webm": true,
+		"mpeg": true,
+		"ogv":  true,
+		"gif":  true,
+	}
+	for _, ext := range extenstionList {
+		if !supportedExtensions[ext] {
+			return nil, fmt.Errorf("ProcessRequest - 3: extension %s is not compatible with ffmpeg", ext)
+		}
+	}
 	// set context with cancel
 	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
@@ -61,6 +146,8 @@ func (e external) ProcessRequest(parentCtx context.Context, blender string, exte
 	}
 
 	errorC := make(chan error, 1+len(args.ExtensionList))
+
+	log.Print("Starting go routine for Upload")
 	go loopUploadBlob(errorC, blenderFileReader, writeStream{i: 0, stream: stream})
 
 	// create array to return readers
