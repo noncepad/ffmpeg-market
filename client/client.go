@@ -16,7 +16,7 @@ import (
 )
 
 type Client interface {
-	ProcessRequest(ctx context.Context, blender string, extenstionList []string) ([]io.ReadCloser, error)
+	ProcessRequest(ctx context.Context, blender string, extenstionList []string) ([]io.Reader, error)
 }
 
 type external struct {
@@ -76,13 +76,12 @@ out:
 	return err
 }
 
-func loopWriteFile(ctx context.Context, errorC chan<- error, fileOut io.WriteCloser, reader io.ReadCloser) {
+func loopWriteFile(ctx context.Context, errorC chan<- error, fileOut io.WriteCloser, reader io.Reader) {
 	_, err := io.Copy(fileOut, reader)
 	log.Printf("finished write-file copy: %s", err)
 	select {
 	case <-ctx.Done():
 	case errorC <- err:
-
 	}
 
 }
@@ -92,7 +91,7 @@ func Create(ctx context.Context, conn *grpc.ClientConn) Client {
 	return external{client: pbf.NewJobManagerClient(conn)}
 }
 
-func (e external) ProcessRequest(parentCtx context.Context, blender string, extenstionList []string) ([]io.ReadCloser, error) {
+func (e external) ProcessRequest(parentCtx context.Context, blender string, extenstionList []string) ([]io.Reader, error) {
 	// Check if the file exists and has the correct extension
 	if _, err := os.Stat(blender); os.IsNotExist(err) {
 		return nil, fmt.Errorf("processRequest - 1: file does not exist, err: %s", err)
@@ -163,7 +162,7 @@ func (e external) ProcessRequest(parentCtx context.Context, blender string, exte
 	go loopUploadBlob(errorC, blenderFileReader, writeStream{i: 0, stream: stream})
 
 	// create array to return readers
-	readerList := make([]io.ReadCloser, len(extenstionList))
+	readerList := make([]io.Reader, len(extenstionList))
 	dataM := make(map[string]chan<- []byte)
 	wg.Add(len(extenstionList))
 
@@ -227,13 +226,12 @@ func (rs readStream) Read(p []byte) (n int, err error) {
 	case <-rs.ctx.Done():
 		err = rs.ctx.Err()
 	case d := <-rs.dataC:
-		if len(d) > len(p) {
+		if len(p) < len(d) {
 			err = fmt.Errorf("buffer to small: %d vs. %d", len(d), len(p))
+		} else if n == 0 {
+			err = io.EOF
 		} else {
-			n = copy(p, d)
-			if n == 0 {
-				err = io.EOF
-			}
+			n = copy(p[0:len(d)], d)
 		}
 	}
 	if err == io.EOF {
@@ -288,6 +286,7 @@ func loopUploadBlob(
 func loopManager(ctx context.Context, errorC chan<- error, stream pbf.JobManager_ProcessClient, dataM map[string]chan<- []byte) {
 
 	doneC := ctx.Done()
+	isDone := false
 	var err error
 out:
 	for 0 < len(dataM) {
@@ -306,11 +305,23 @@ out:
 		}
 		select {
 		case <-doneC:
+			isDone = true
 			break out
 		case dataC <- msg.Data:
-			log.Printf("mgr send (ext %s) %d", msg.Extenstion, len(msg.Data))
+			log.Printf("client send (ext %s) %d", msg.Extenstion, len(msg.Data))
 			if len(msg.Data) == 0 {
 				delete(dataM, msg.Extenstion)
+			}
+		}
+	}
+	if err == nil && !isDone {
+		log.Print("sending EOFs")
+		for ext, dataC := range dataM {
+			// do EOF to file handles
+			log.Printf("sending EOF to %s", ext)
+			select {
+			case <-doneC:
+			case dataC <- []byte{}:
 			}
 		}
 	}

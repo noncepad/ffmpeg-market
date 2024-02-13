@@ -97,26 +97,29 @@ func (e external) Process(stream pbf.JobManager_ProcessServer) error {
 		go loopProcessWrite(errorC, readerList[i], writeList[i], ext)
 	}
 
+	log.Print("entering process errorC loop")
+out:
 	// wait until the 1+n go routines above finish
-	for i := 0; i < 1+len(args.ExtensionList); i++ {
+	for i := 0; i < len(args.ExtensionList); i++ {
 		select {
 		case <-doneC:
 			return ctx.Err()
 		case err = <-errorC:
-			for _, v := range writeList {
-				v.m.Lock()
-				v.done = true
-				v.m.Unlock()
-			}
 			if err != nil {
-				log.Printf("exiting process: %s", err)
-				return err
+				break out
 			}
 		}
 	}
+	log.Print("exited processs errorC loop")
+	for _, v := range readerList {
+		if v != nil {
+			v.Close()
+		}
+	}
+	log.Printf("exiting process: %s", err)
 	// the worker stops working at this point as it has finished sending us file handles
 
-	return nil
+	return err
 }
 
 // routine that reads everything (1 stream)
@@ -141,26 +144,20 @@ func readProcess(
 
 func loopProcessWrite(
 	errorC chan<- error,
-	reader io.ReadCloser,
-	writer io.WriteCloser,
+	reader io.Reader,
+	writer io.Writer,
 	ext string,
 ) {
 	if reader == nil {
-		writer.Close()
+		//writer.Close()
 		errorC <- fmt.Errorf("no reader %s", ext)
 		return
 	}
-	defer reader.Close()
+	log.Printf("1 - writing done (ext %s)", ext)
 	_, err := io.Copy(writer, reader)
 	// we must inform the Process function when we finish our task
-	log.Printf("1 - writing done (ext %s): %s", ext, err)
-	if err != nil {
-		errorC <- err
-		writer.Close()
-	} else {
-		writer.Close()
-		errorC <- err
-	}
+	//writer.Close()
+	errorC <- err
 	log.Printf("2 - writing done (ext %s): %s", ext, err)
 }
 
@@ -173,21 +170,6 @@ type writeStream struct {
 	stream pbf.JobManager_ProcessServer
 }
 
-func (ws *writeStream) Close() error {
-	ws.m.Lock()
-	if ws.done {
-		ws.m.Unlock()
-		return nil
-	}
-	ws.done = true
-	ws.m.Unlock()
-	resp := new(pbf.ProcessResponse)
-	resp.Extenstion = ws.ext
-	resp.Data = make([]byte, 0)
-	log.Printf("write stream close %s", ws.ext)
-	return ws.stream.Send(resp)
-}
-
 // the data in already in p []byte; we need to Send via stream
 // n is the number of bytes in the array
 func (ws *writeStream) Write(p []byte) (n int, err error) {
@@ -197,12 +179,13 @@ func (ws *writeStream) Write(p []byte) (n int, err error) {
 	n = copy(resp.Data, p)
 	ws.i += n
 	ws.m.Lock()
-	if n == 0 && !ws.done {
-		ws.done = true
-	} else if n == 0 {
+	if n == 0 && ws.done {
 		ws.m.Unlock()
 		err = errors.New("already closed")
 		return
+	} else if n == 0 {
+		err = io.EOF
+		ws.done = true
 	}
 	ws.m.Unlock()
 	log.Printf("1 - server write (ext %s) stdout %d: %s", ws.ext, ws.i, err)
@@ -303,7 +286,7 @@ func (rs *readStream) Read(p []byte) (n int, err error) {
 		return
 	}
 	// write down how many bytes we have written so far
-	rs.i += copy(p, blob.Data)
+	rs.i += copy(p[0:len(blob.Data)], blob.Data)
 	if rs.total < uint64(rs.i) {
 		err = fmt.Errorf("too many bytes written: %d vs %d", rs.total, rs.i)
 	}

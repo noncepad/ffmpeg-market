@@ -32,7 +32,7 @@ func TestFfmpeg(t *testing.T) {
 	t.Cleanup(func() { os.RemoveAll("/tmp/myworkdir") })
 	go loopRunManager(ctx, errorC, url, cancel)
 	time.Sleep(10 * time.Second)
-	err = client.Run(ctx, []string{url, "../files/solpop.blend", "../files", "mp4", "mpeg"})
+	err = client.Run(ctx, []string{url, "../files/solpop.blend", "../files", "mp4", "gif", "mpeg", "ogv"})
 	if err != nil {
 		t.Fatal(err)
 	}
