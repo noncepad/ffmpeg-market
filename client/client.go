@@ -7,6 +7,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 
 	pbf "gitlab.noncepad.com/naomiyoko/ffmpeg-market/proto/ffmpeg"
 	"google.golang.org/grpc"
@@ -25,6 +27,10 @@ type external struct {
 // args: 0=url string, 1=fileIn string, 2=DirOut string, 3=ext []string
 func Run(parentCtx context.Context, args []string) error {
 
+	go func() {
+		<-parentCtx.Done()
+		log.Print("parent ctx done")
+	}()
 	// Check if the output directory exists
 	if _, err := os.Stat(args[2]); os.IsNotExist(err) {
 		return fmt.Errorf("Run - 1: output directory does not exist, err: %s", err)
@@ -43,10 +49,10 @@ func Run(parentCtx context.Context, args []string) error {
 	dir := args[2]
 	extList := args[3:]
 	readerList, err := client.ProcessRequest(ctx, blenderIn, extList)
-	errorC := make(chan error, len(args[4:]))
 	if err != nil {
 		return err
 	}
+	errorC := make(chan error, len(readerList))
 	for i, reader := range readerList {
 		f, err := os.Create(fmt.Sprintf("%s/out.%s", dir, extList[i]))
 		if err != nil {
@@ -72,10 +78,11 @@ out:
 
 func loopWriteFile(ctx context.Context, errorC chan<- error, fileOut io.WriteCloser, reader io.ReadCloser) {
 	_, err := io.Copy(fileOut, reader)
-
+	log.Printf("finished write-file copy: %s", err)
 	select {
 	case <-ctx.Done():
 	case errorC <- err:
+
 	}
 
 }
@@ -88,9 +95,9 @@ func Create(ctx context.Context, conn *grpc.ClientConn) Client {
 func (e external) ProcessRequest(parentCtx context.Context, blender string, extenstionList []string) ([]io.ReadCloser, error) {
 	// Check if the file exists and has the correct extension
 	if _, err := os.Stat(blender); os.IsNotExist(err) {
-		return nil, fmt.Errorf("ProcessRequest - 1: file does not exist, err: %s", err)
+		return nil, fmt.Errorf("processRequest - 1: file does not exist, err: %s", err)
 	} else if filepath.Ext(blender) != ".blend" {
-		return nil, fmt.Errorf("Process Request - 2: file must have .blend extension, err %s", err)
+		return nil, fmt.Errorf("process Request - 2: file must have .blend extension, err %s", err)
 	}
 
 	// check if file extenstions are compatible with ffmpeg
@@ -107,16 +114,17 @@ func (e external) ProcessRequest(parentCtx context.Context, blender string, exte
 	}
 	for _, ext := range extenstionList {
 		if !supportedExtensions[ext] {
-			return nil, fmt.Errorf("ProcessRequest - 3: extension %s is not compatible with ffmpeg", ext)
+			return nil, fmt.Errorf("processRequest - 3: extension %s is not compatible with ffmpeg", ext)
 		}
 	}
 	// set context with cancel
 	ctx, cancel := context.WithCancel(parentCtx)
-	defer cancel()
+	wg := &sync.WaitGroup{}
 
 	// gRPC call to the server
 	stream, err := e.client.Process(ctx)
 	if err != nil {
+		cancel()
 		return nil, err
 	}
 	// create_args() w extensionlist
@@ -125,23 +133,27 @@ func (e external) ProcessRequest(parentCtx context.Context, blender string, exte
 		Args: args,
 	}})
 	if err != nil {
+		cancel()
 		return nil, err
 	}
 
 	// create_targertMeta() w os.stat (ext + size)
 	tMeta, err := createTargertMeta(blender)
 	if err != nil {
+		cancel()
 		return nil, err
 	}
 	err = stream.Send(&pbf.ProcessRequest{Data: &pbf.ProcessRequest_Meta{
 		Meta: tMeta,
 	}})
 	if err != nil {
+		cancel()
 		return nil, err
 	}
 	// write in blender file (upload targetblob, io.copy to send chunks)
 	blenderFileReader, err := os.Open(blender)
 	if err != nil {
+		cancel()
 		return nil, err
 	}
 
@@ -153,16 +165,32 @@ func (e external) ProcessRequest(parentCtx context.Context, blender string, exte
 	// create array to return readers
 	readerList := make([]io.ReadCloser, len(extenstionList))
 	dataM := make(map[string]chan<- []byte)
+	wg.Add(len(extenstionList))
+
 	for i, ext := range extenstionList {
 		dataC := make(chan []byte, 1000)
 		dataM[ext] = dataC
-		readerList[i] = &readStream{ctx: ctx, i: 0, dataC: dataC, cancel: cancel, ext: ext}
+		readerList[i] = &readStream{ctx: ctx, wg: wg, i: 0, dataC: dataC, cancel: cancel, ext: ext}
 	}
 
-	go loopManager(ctx, cancel, errorC, stream, dataM)
-
+	go loopManager(ctx, errorC, stream, dataM)
+	go loopWait(wg, cancel)
+	go loopStop(ctx, cancel, errorC)
 	// return reader array
 	return readerList, nil
+}
+func loopStop(ctx context.Context, cancel context.CancelFunc, errorC <-chan error) {
+	defer cancel()
+	var err error
+	select {
+	case <-ctx.Done():
+	case err = <-errorC:
+	}
+	log.Printf("stop error: %s", err)
+}
+func loopWait(wg *sync.WaitGroup, cancel context.CancelFunc) {
+	wg.Wait()
+	cancel()
 }
 
 type writeStream struct {
@@ -171,18 +199,22 @@ type writeStream struct {
 }
 
 func (ws writeStream) Write(p []byte) (n int, err error) {
-	data := make([]byte, len(p))
+	log.Printf("write - %d", len(p))
 
-	resp := new(pbf.ProcessResponse)
-	resp.Data = data
-	n = copy(data, p)
-	ws.i += n
-	//n = len(resp.Data)
+	blob := new(pbf.TargetBlob)
+	blob.Data = make([]byte, len(p))
+	n = copy(blob.Data, p)
+	err = ws.stream.Send(&pbf.ProcessRequest{
+		Data: &pbf.ProcessRequest_Blob{
+			Blob: blob,
+		},
+	})
 	return
 }
 
 type readStream struct {
 	ctx    context.Context
+	wg     *sync.WaitGroup
 	i      int
 	dataC  <-chan []byte
 	cancel context.CancelFunc
@@ -199,7 +231,16 @@ func (rs readStream) Read(p []byte) (n int, err error) {
 			err = fmt.Errorf("buffer to small: %d vs. %d", len(d), len(p))
 		} else {
 			n = copy(p, d)
+			if n == 0 {
+				err = io.EOF
+			}
 		}
+	}
+	if err == io.EOF {
+		rs.wg.Done()
+	} else if err != nil {
+		rs.cancel()
+		rs.wg.Done()
 	}
 	return
 }
@@ -221,7 +262,7 @@ func createTargertMeta(blender string) (*pbf.TargetMeta, error) {
 	if err != nil {
 		return nil, err
 	}
-	extension := filepath.Ext(blender)
+	extension := strings.TrimPrefix(filepath.Ext(blender), ".")
 	tMeta := &pbf.TargetMeta{
 		Size:      uint64(info.Size()),
 		Extension: extension,
@@ -238,39 +279,47 @@ func loopUploadBlob(
 	defer reader.Close()
 	_, err := io.Copy(writer, reader)
 	// we must inform the Process function when we finish our task
-	errorC <- err
+	if err != nil {
+		errorC <- err
+	}
+	log.Printf("client upload: %s", err)
 }
 
-func loopManager(ctx context.Context, cancel context.CancelFunc, errorC chan<- error, stream pbf.JobManager_ProcessClient, dataM map[string]chan<- []byte) {
-	defer cancel()
+func loopManager(ctx context.Context, errorC chan<- error, stream pbf.JobManager_ProcessClient, dataM map[string]chan<- []byte) {
+
 	doneC := ctx.Done()
-	for {
-		msg, err := stream.Recv()
+	var err error
+out:
+	for 0 < len(dataM) {
+		var msg *pbf.ProcessResponse
+		msg, err = stream.Recv()
 		if err == io.EOF {
 			err = nil
-			for _, dataC := range dataM {
-				select {
-				case <-doneC:
-					return
-				case dataC <- []byte{}:
-				}
-			}
-			return
+			break out
 		} else if err != nil {
-			return
+			break out
 		}
 		dataC, present := dataM[msg.Extenstion]
 		if !present {
-			return
+			err = fmt.Errorf("unknown output extension %s", msg.Extenstion)
+			break out
 		}
 		select {
 		case <-doneC:
-			return
+			break out
 		case dataC <- msg.Data:
+			log.Printf("mgr send (ext %s) %d", msg.Extenstion, len(msg.Data))
+			if len(msg.Data) == 0 {
+				delete(dataM, msg.Extenstion)
+			}
 		}
-
 	}
 
+	if err != nil {
+		errorC <- err
+	}
+
+	log.Printf("finished manager: %s and %d", err, len(dataM))
 }
 
 func (rs readStream) Close() error {

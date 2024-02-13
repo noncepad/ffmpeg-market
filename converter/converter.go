@@ -4,13 +4,16 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 )
 
 type Converter interface {
 	// takes an mp4 inputfile and converts it to a gif output file
-	Convert(ctx context.Context, inputFile string, ext string) (io.ReadCloser, error)
+	Convert(ctx context.Context, inputFile string, outFp string) error
 	Render(ctx context.Context, inputFile, outputFile string) error
 }
 
@@ -34,29 +37,39 @@ func CreateSimpleConverter(ctx context.Context, config *Configuration) (Converte
 // we need to put a context variable here
 // the sc.ctx is for the server as a whole.
 // ctx is for the user request.
-func (sc *simpleConverter) Convert(ctx context.Context, inputFile string, ext string) (io.ReadCloser, error) {
+func (sc *simpleConverter) Convert(ctx context.Context, inputFile string, outFp string) error {
 	// use create to make sure we are not overwriting a file
 	// the command will fail if the output file already exists
-	saveHandle, stdout := io.Pipe()
+	//saveHandle, stdout := io.Pipe()
 
 	// OLD: ffmpeg -i ./files/solpipe.mkv ./files/solpipe2.gif
 	// new: ffmpeg -i ./files/solpipe.mp4 -f gif pipe:1 > ./files/solpipe5.gif
-	cmd := exec.CommandContext(ctx, sc.config.BinFfmpeg, "-i", inputFile, "-f", ext, "pipe:1")
+	var err error
+	cmd := exec.CommandContext(ctx, sc.config.BinFfmpeg, "-i", inputFile, "-f", strings.TrimPrefix(filepath.Ext(outFp), "."), outFp)
 
 	// redirect stdout to the save handle
-	cmd.Stdout = stdout
+	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	err := cmd.Start()
+	err = cmd.Start()
 	if err != nil {
+		log.Printf("ffmpeg command failed: %v", err)
 		err = fmt.Errorf("ffmpeg command failed: %v", err)
-		return nil, err
+		return err
 	}
-
 	// conversion is complete when we close the PipeReader
 	// let the command execute in the background
 	// use the saveHandle to read stdout from the command while in the foreground
-	go loopCloseWithError(cmd, saveHandle)
-	return saveHandle, nil
+	//go loopCloseWithError(cmd, saveHandle)
+	log.Printf("ffmpeg %s %s successfully started", inputFile, outFp)
+	err = cmd.Wait()
+	log.Printf("ffmpeg ext %s done: %s", outFp, err)
+	if err != nil {
+		log.Printf("ffmpeg command failed: %v", err)
+		err = fmt.Errorf("ffmpeg command failed: %v", err)
+		return err
+	}
+
+	return nil
 }
 
 func loopCloseWithError(
@@ -79,6 +92,7 @@ func (sc *simpleConverter) Render(ctx context.Context, inputFile, outputFile str
 		return err
 	}
 	// blender -b ./files/solpop.blend -o ./files/solpop.avi -F AVIJPEG -x 1 -f 1 -a
+	cmdStr := []string{sc.config.BinBlender, "-b", inputFile, "-o", outputFile, "-F", "AVIJPEG", "-x", "1", "-f", "1", "-a"}
 	cmd := exec.CommandContext(ctx, sc.config.BinBlender, "-b", inputFile, "-o", outputFile, "-F", "AVIJPEG", "-x", "1", "-f", "1", "-a")
 
 	// redirect stdout to the save handle
@@ -87,9 +101,12 @@ func (sc *simpleConverter) Render(ctx context.Context, inputFile, outputFile str
 	err = cmd.Start()
 	if err != nil {
 		err = fmt.Errorf("blender command failed: %v", err)
+		log.Print(err)
 		return err
 	}
 
-	fmt.Println("Rendering successful")
+	log.Printf("Rendering started: %+v", cmdStr)
 	return cmd.Wait()
 }
+
+// /usr/bin/blender -b ./files/solpipe.blend -o ./files/out.avi -F AVIJPEG -x 1 -f 1 -a

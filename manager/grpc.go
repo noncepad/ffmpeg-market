@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
+	"sync"
 
 	pbf "gitlab.noncepad.com/naomiyoko/ffmpeg-market/proto/ffmpeg"
 	"google.golang.org/grpc"
@@ -17,6 +19,11 @@ type external struct {
 }
 
 func (e external) Process(stream pbf.JobManager_ProcessServer) error {
+	ctx3 := stream.Context()
+	go func() {
+		<-ctx3.Done()
+		log.Print("stream context canceled")
+	}()
 	ctx, cancel := context.WithCancel(stream.Context())
 	doneC := ctx.Done()
 	defer cancel()
@@ -52,9 +59,12 @@ func (e external) Process(stream pbf.JobManager_ProcessServer) error {
 
 	// we need to read in the blender file (only TargetBlob)
 	// 1 error for go routine we spawn here
-	errorC := make(chan error, 1+len(args.ExtensionList))
-	go loopReadProcess(ctx, &readStream{stream: stream, i: 0, total: tMeta.Size}, errorC, sourceFilePath)
-
+	log.Printf("receiving blender file")
+	err = readProcess(ctx, &readStream{stream: stream, i: 0, total: tMeta.Size}, sourceFilePath)
+	if err != nil {
+		return err
+	}
+	log.Printf("processing blender file")
 	// feed sourceFilePath
 	// do conversions in the work pool
 	// this blocks until we get read file handles from ffmpeg stdout
@@ -64,6 +74,11 @@ func (e external) Process(stream pbf.JobManager_ProcessServer) error {
 	}
 	// check correspondence
 	if len(args.ExtensionList) != len(readerList) {
+		for _, v := range readerList {
+			if v != nil {
+				v.Close()
+			}
+		}
 		return fmt.Errorf("expected reader list of length %d but got length %d", len(args.ExtensionList), len(readerList))
 	}
 
@@ -73,10 +88,13 @@ func (e external) Process(stream pbf.JobManager_ProcessServer) error {
 		    bytes data=2;
 		}
 	*/
+	errorC := make(chan error, len(args.ExtensionList))
+	writeList := make([]*writeStream, len(readerList))
 	// there is a one to one correspondence between args.ExtensionList and readerList
 	for i, ext := range args.ExtensionList {
+		writeList[i] = &writeStream{done: false, i: 0, ext: ext, stream: stream, m: &sync.Mutex{}}
 		// read stdout from the ffmpeg process in manager, and send the data to the customer
-		go loopProcessWrite(errorC, readerList[i], &writeStream{i: 0, ext: ext, stream: stream})
+		go loopProcessWrite(errorC, readerList[i], writeList[i], ext)
 	}
 
 	// wait until the 1+n go routines above finish
@@ -85,7 +103,13 @@ func (e external) Process(stream pbf.JobManager_ProcessServer) error {
 		case <-doneC:
 			return ctx.Err()
 		case err = <-errorC:
+			for _, v := range writeList {
+				v.m.Lock()
+				v.done = true
+				v.m.Unlock()
+			}
 			if err != nil {
+				log.Printf("exiting process: %s", err)
 				return err
 			}
 		}
@@ -95,69 +119,97 @@ func (e external) Process(stream pbf.JobManager_ProcessServer) error {
 	return nil
 }
 
-// go routine that reads everything (1 stream)
-func loopReadProcess(
+// routine that reads everything (1 stream)
+func readProcess(
 	ctx context.Context,
 	blobReader io.Reader,
-	errorC chan<- error,
 	sourceFilePath string,
-) {
-	doneC := ctx.Done()
-	// Create the named pipe
-
+) error {
 	writeFileHandle, err := os.Create(sourceFilePath)
 	if err != nil {
-		select {
-		case <-doneC:
-		case errorC <- fmt.Errorf("error creating named pipe - 2: %s", err):
-		}
-		return
+		log.Printf("write file handle error: %s", err)
+		return fmt.Errorf("error creating named pipe - 2: %s", err)
 	}
 	defer writeFileHandle.Close()
 	_, err = io.Copy(writeFileHandle, blobReader)
 	if err != nil {
-		select {
-		case <-doneC:
-		case errorC <- fmt.Errorf("error creating named pipe - 3: %s", err):
-		}
-	} else {
-		// tell the Process function we have completed our task
-		select {
-		case <-doneC:
-		case errorC <- nil:
-		}
+		log.Printf("copy error: %s", err)
+		return fmt.Errorf("error creating named pipe - 3: %s", err)
 	}
+	return nil
 }
 
 func loopProcessWrite(
 	errorC chan<- error,
 	reader io.ReadCloser,
-	writer io.Writer,
+	writer io.WriteCloser,
+	ext string,
 ) {
+	if reader == nil {
+		writer.Close()
+		errorC <- fmt.Errorf("no reader %s", ext)
+		return
+	}
 	defer reader.Close()
 	_, err := io.Copy(writer, reader)
 	// we must inform the Process function when we finish our task
-	errorC <- err
+	log.Printf("1 - writing done (ext %s): %s", ext, err)
+	if err != nil {
+		errorC <- err
+		writer.Close()
+	} else {
+		writer.Close()
+		errorC <- err
+	}
+	log.Printf("2 - writing done (ext %s): %s", ext, err)
 }
 
 // implements io.Writer interface
 type writeStream struct {
+	m      *sync.Mutex
 	ext    string
 	i      int
+	done   bool
 	stream pbf.JobManager_ProcessServer
+}
+
+func (ws *writeStream) Close() error {
+	ws.m.Lock()
+	if ws.done {
+		ws.m.Unlock()
+		return nil
+	}
+	ws.done = true
+	ws.m.Unlock()
+	resp := new(pbf.ProcessResponse)
+	resp.Extenstion = ws.ext
+	resp.Data = make([]byte, 0)
+	log.Printf("write stream close %s", ws.ext)
+	return ws.stream.Send(resp)
 }
 
 // the data in already in p []byte; we need to Send via stream
 // n is the number of bytes in the array
 func (ws *writeStream) Write(p []byte) (n int, err error) {
-	data := make([]byte, len(p))
-
 	resp := new(pbf.ProcessResponse)
 	resp.Extenstion = ws.ext
-	resp.Data = data
-	n = copy(data, p)
+	resp.Data = make([]byte, len(p))
+	n = copy(resp.Data, p)
 	ws.i += n
+	ws.m.Lock()
+	if n == 0 && !ws.done {
+		ws.done = true
+	} else if n == 0 {
+		ws.m.Unlock()
+		err = errors.New("already closed")
+		return
+	}
+	ws.m.Unlock()
+	log.Printf("1 - server write (ext %s) stdout %d: %s", ws.ext, ws.i, err)
+	err = ws.stream.Send(resp)
+
 	//n = len(resp.Data)
+	log.Printf("2 - server write (ext %s) stdout %d: %s", ws.ext, ws.i, err)
 	return
 }
 
@@ -213,6 +265,12 @@ type readStream struct {
 // we need to put data into the p []byte array.
 func (rs *readStream) Read(p []byte) (n int, err error) {
 	n = 0
+	if rs.total <= uint64(rs.i) {
+		n = 0
+		err = io.EOF
+		return
+	}
+
 	msg, err := rs.stream.Recv()
 	if err != nil {
 		return
@@ -249,6 +307,7 @@ func (rs *readStream) Read(p []byte) (n int, err error) {
 	if rs.total < uint64(rs.i) {
 		err = fmt.Errorf("too many bytes written: %d vs %d", rs.total, rs.i)
 	}
+	log.Printf("rs.i %d", rs.i)
 	return
 }
 
@@ -266,5 +325,6 @@ func loopCleanUpDir(
 ) {
 	// delete the temporary directory
 	<-ctx.Done()
+	log.Printf("removing temporary directory: %s", dir)
 	os.RemoveAll(dir)
 }
