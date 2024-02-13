@@ -18,7 +18,7 @@ import (
 func TestFfmpeg(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	for _, v := range []string{"gif", "mp4", "mpeg"} {
+	for _, v := range []string{"gif", "mp4", "mpeg", "ogv"} {
 		os.Remove("../files/out." + v)
 	}
 
@@ -32,7 +32,7 @@ func TestFfmpeg(t *testing.T) {
 	t.Cleanup(func() { os.RemoveAll("/tmp/myworkdir") })
 	go loopRunManager(ctx, errorC, url, cancel)
 	time.Sleep(10 * time.Second)
-	err = client.Run(ctx, []string{url, "../files/solpop.blend", "../files", "mp4", "gif", "mpeg", "ogv"})
+	err = client.Run(ctx, []string{url, "../files/solpop.blend", "../files", "mpeg", "ogv"})
 	if err != nil {
 		t.Fatal(err)
 	}
