@@ -1,9 +1,7 @@
 package client
 
 import (
-	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -13,7 +11,6 @@ import (
 
 	pbf "gitlab.noncepad.com/naomiyoko/ffmpeg-market/proto/ffmpeg"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 type Client interface {
@@ -24,46 +21,10 @@ type external struct {
 	client pbf.JobManagerClient
 }
 
-// host:port
-// args: 0=url string, 1=fileIn string, 2=DirOut string, 3=ext []string
-func Run(parentCtx context.Context, args []string) error {
-
-	go func() {
-		<-parentCtx.Done()
-		log.Print("parent ctx done")
-	}()
-	// Check if the output directory exists
-	if _, err := os.Stat(args[2]); os.IsNotExist(err) {
-		return fmt.Errorf("Run - 1: output directory does not exist, err: %s", err)
-	}
-
-	// Create a client
-	ctx, cancel := context.WithCancel(parentCtx)
-	defer cancel()
-	conn, err := grpc.DialContext(ctx, args[0], grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		return err
-	}
-	client := Create(ctx, conn)
-	blenderIn := args[1]
-	dir := args[2]
-	extList := args[3:]
-
-	err = client.ProcessRequest(ctx, blenderIn, dir, extList)
-	if err != nil {
-		return err
-	}
-
-	return err
-}
-
+// simple implementation of Client
 func Create(ctx context.Context, conn *grpc.ClientConn) Client {
 	// Create a new gRPC client
 	return external{client: pbf.NewJobManagerClient(conn)}
-}
-
-func outfilePath(dir string, ext string) string {
-	return fmt.Sprintf("%s/out.%s", dir, ext)
 }
 
 func (e external) ProcessRequest(parentCtx context.Context, blender string, outDir string, extenstionList []string) error {
@@ -149,38 +110,6 @@ func (e external) ProcessRequest(parentCtx context.Context, blender string, outD
 	return handleStream(ctx, cancel, stream, dataM, logC)
 }
 
-func loopLog(ctx context.Context, logC <-chan Log) {
-	doneC := ctx.Done()
-out:
-	for {
-		select {
-		case <-doneC:
-			break out
-		case x := <-logC:
-			log.Printf("server log: %s", x)
-		}
-	}
-}
-
-type writeStream struct {
-	i      int
-	stream pbf.JobManager_ProcessClient
-}
-
-func (ws writeStream) Write(p []byte) (n int, err error) {
-	log.Printf("write - %d", len(p))
-
-	blob := new(pbf.TargetBlob)
-	blob.Data = make([]byte, len(p))
-	n = copy(blob.Data, p)
-	err = ws.stream.Send(&pbf.ProcessRequest{
-		Data: &pbf.ProcessRequest_Blob{
-			Blob: blob,
-		},
-	})
-	return
-}
-
 func createArgs(extensionList []string) *pbf.ProcessArgs {
 	list := make([]string, len(extensionList))
 	copy(list, extensionList)
@@ -207,6 +136,7 @@ func createTargertMeta(blender string) (*pbf.TargetMeta, error) {
 	return tMeta, nil
 }
 
+// upload the target file to the server
 func loopUploadBlob(
 	errorC chan<- error,
 	reader io.ReadCloser,
@@ -221,87 +151,6 @@ func loopUploadBlob(
 	log.Printf("client upload: %s", err)
 }
 
-type Log struct {
-	Out string
-}
-
-func handleStream(
-	ctx context.Context,
-	cancel context.CancelCauseFunc,
-	stream pbf.JobManager_ProcessClient,
-	dataM map[string]io.WriteCloser,
-	logC chan<- Log,
-) error {
-	doneC := ctx.Done()
-	defer stream.CloseSend()
-	var err error
-out:
-	for 0 < len(dataM) {
-		var msg *pbf.ProcessResponse
-		log.Print("client stream - 1")
-		msg, err = stream.Recv()
-		log.Print("client stream - 2")
-		if err == io.EOF {
-			err = nil
-			break out
-		} else if err != nil {
-			break out
-		}
-		switch msg.Data.(type) {
-		case *pbf.ProcessResponse_Blob:
-			err = handleMessageBlob(msg.GetBlob(), dataM)
-		case *pbf.ProcessResponse_Log:
-			l := msg.GetLog()
-			select {
-			case <-doneC:
-				break out
-			case logC <- Log{
-				Out: l.Log,
-			}:
-			}
-		default:
-			err = errors.New("unknown message")
-		}
-		if err != nil {
-			break out
-		}
-
-	}
-	for ext, writer := range dataM {
-		// do EOF to file handles
-		log.Printf("sending EOF to %s", ext)
-		writer.Close()
-	}
-	log.Printf("1 - finished manager: %s and %d", err, len(dataM))
-	return err
-}
-
-func handleMessageBlob(
-	msg *pbf.TargetBlob,
-	dataM map[string]io.WriteCloser,
-) error {
-	var err error
-	if msg.Data == nil {
-		msg.Data = []byte{}
-	}
-	writer, present := dataM[msg.Extension]
-	if !present && 0 < len(msg.Data) {
-		return fmt.Errorf("unknown output extension %s; %d", msg.Extension, len(msg.Data))
-
-	} else if !present {
-		return nil
-	}
-	if 0 < len(msg.Data) {
-		log.Print("client stream - 3")
-		_, err = io.Copy(writer, bytes.NewBuffer(msg.Data))
-		log.Print("client stream - 4")
-		log.Printf("client writing %s %d", msg.Extension, len(msg.Data))
-		if err != nil {
-			return err
-		}
-	} else {
-		delete(dataM, msg.Extension)
-		writer.Close()
-	}
-	return nil
+func outfilePath(dir string, ext string) string {
+	return fmt.Sprintf("%s/out.%s", dir, ext)
 }

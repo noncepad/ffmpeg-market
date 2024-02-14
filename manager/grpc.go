@@ -26,15 +26,7 @@ func (e external) Process(stream pbf.JobManager_ProcessServer) error {
 	ctx, cancel := context.WithCancel(stream.Context())
 	doneC := ctx.Done()
 	defer cancel()
-	/*
-	   message ProcessRequest{
-	     oneof data{
-	       ProcessArgs args = 1;
-	       TargetMeta meta = 2;
-	       TargetBlob blob = 3;
-	     }
-	   }
-	*/
+
 	// assume the user first sends us ProcessArgs; fail otherwise
 	args, err := process_readArgs(stream)
 	if err != nil {
@@ -46,6 +38,7 @@ func (e external) Process(stream pbf.JobManager_ProcessServer) error {
 	if err != nil {
 		return err
 	}
+
 	tmpDir, err := os.MkdirTemp("/tmp", "blender*")
 	if err != nil {
 		return err
@@ -244,7 +237,8 @@ func readProcess(
 	return nil
 }
 
-// TODO: sanitize args
+const MAX_ALLOWED = 5
+
 // grab the processArg data from user
 func process_readArgs(
 	stream pbf.JobManager_ProcessServer,
@@ -253,10 +247,11 @@ func process_readArgs(
 	if err != nil {
 		return nil, err
 	}
+	var args *pbf.ProcessArgs
 	// from the protobuf, we have: "oneof data"
 	switch msg.Data.(type) {
 	case *pbf.ProcessRequest_Args:
-		return msg.GetArgs(), nil
+		args = msg.GetArgs()
 	case *pbf.ProcessRequest_Meta:
 		return nil, errors.New("received meta, not args")
 	case *pbf.ProcessRequest_Blob:
@@ -264,6 +259,41 @@ func process_readArgs(
 	default:
 		return nil, errors.New("received unknown, not args")
 	}
+	if args.ExtensionList == nil {
+		args.ExtensionList = []string{}
+	}
+	if len(args.ExtensionList) == 0 {
+		return nil, errors.New("not enough output file extensions")
+	}
+	if MAX_ALLOWED < len(args.ExtensionList) {
+		return nil, fmt.Errorf("too many file extensions requested, only %d allowed, not %d", MAX_ALLOWED, len(args.ExtensionList))
+	}
+	// check if file extenstions are compatible with ffmpeg
+	var supportedExtensions = map[string]bool{
+		"mp4":  true,
+		"mov":  true,
+		"flv":  true,
+		"wmv":  true,
+		"webm": true,
+		"mpeg": true,
+		"ogv":  true,
+		"gif":  true,
+	}
+	cleanList := make(map[string]bool)
+	for _, ext := range args.ExtensionList {
+		cleanList[ext] = true
+		_, present := supportedExtensions[ext]
+		if !present {
+			return nil, fmt.Errorf("processRequest - 3: extension %s is not compatible with ffmpeg", ext)
+		}
+	}
+	args.ExtensionList = make([]string, len(cleanList))
+	i := 0
+	for k := range cleanList {
+		args.ExtensionList[i] = k
+		i++
+	}
+	return args, nil
 }
 
 // TODO: sanitize tMeta
@@ -342,6 +372,7 @@ func (rs *readStream) Read(p []byte) (n int, err error) {
 	return
 }
 
+// Create a grpc endpoint
 func (m Manager) Add(s *grpc.Server) {
 	e1 := external{
 		manager: m,
