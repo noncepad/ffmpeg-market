@@ -165,6 +165,10 @@ func loopClose(ctx context.Context, listner net.Listener, s *grpc.Server) {
 	listner.Close()
 }
 
+type clientLogger interface {
+	Send(string)
+}
+
 func (m Manager) SendJob(
 	ctx context.Context,
 	Blender string,

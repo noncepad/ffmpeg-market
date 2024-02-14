@@ -39,13 +39,20 @@ message TargetMeta{
 
 // for uploading a file
 message TargetBlob{
-    bytes data= 1;
+  bytes data= 1;
+  string extension = 2;
+}
+
+message Log{
+  string log = 1;
 }
 
 // for downloading files by extension
 message ProcessResponse{
-    string extenstion=1;
-    bytes data=2;
+  oneof data{
+    TargetBlob blob = 1;
+    Log log = 2;
+  }
 }
 
 // Service that could represent your manager's job handling.

@@ -3,7 +3,6 @@ package manager_test
 import (
 	"context"
 	"fmt"
-	"io"
 	"testing"
 
 	"gitlab.noncepad.com/naomiyoko/ffmpeg-market/converter"
@@ -33,7 +32,7 @@ func TestSendJob(t *testing.T) {
 
 	blender := "../files/solpop.blend"
 	out := []string{"mp4", "mkv", "gif"}
-	var responseList []io.ReadCloser
+	var responseList []string
 
 	expectedNumResponses := len(out)
 

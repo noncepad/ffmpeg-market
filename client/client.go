@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -142,8 +143,23 @@ func (e external) ProcessRequest(parentCtx context.Context, blender string, outD
 			return err
 		}
 	}
+	logC := make(chan Log, 1_000)
+	go loopLog(ctx, logC)
 
-	return doManager(ctx, cancel, stream, dataM)
+	return handleStream(ctx, cancel, stream, dataM, logC)
+}
+
+func loopLog(ctx context.Context, logC <-chan Log) {
+	doneC := ctx.Done()
+out:
+	for {
+		select {
+		case <-doneC:
+			break out
+		case x := <-logC:
+			log.Printf("server log: %s", x)
+		}
+	}
 }
 
 type writeStream struct {
@@ -205,7 +221,18 @@ func loopUploadBlob(
 	log.Printf("client upload: %s", err)
 }
 
-func doManager(ctx context.Context, cancel context.CancelCauseFunc, stream pbf.JobManager_ProcessClient, dataM map[string]io.WriteCloser) error {
+type Log struct {
+	Out string
+}
+
+func handleStream(
+	ctx context.Context,
+	cancel context.CancelCauseFunc,
+	stream pbf.JobManager_ProcessClient,
+	dataM map[string]io.WriteCloser,
+	logC chan<- Log,
+) error {
+	doneC := ctx.Done()
 	defer stream.CloseSend()
 	var err error
 out:
@@ -220,27 +247,23 @@ out:
 		} else if err != nil {
 			break out
 		}
-		if msg.Data == nil {
-			msg.Data = []byte{}
-		}
-		writer, present := dataM[msg.Extenstion]
-		if !present && 0 < len(msg.Data) {
-			err = fmt.Errorf("unknown output extension %s; %d", msg.Extenstion, len(msg.Data))
-			break out
-		} else if !present {
-			continue
-		}
-		if 0 < len(msg.Data) {
-			log.Print("client stream - 3")
-			_, err = io.Copy(writer, bytes.NewBuffer(msg.Data))
-			log.Print("client stream - 4")
-			log.Printf("client writing %s %d", msg.Extenstion, len(msg.Data))
-			if err != nil {
+		switch msg.Data.(type) {
+		case *pbf.ProcessResponse_Blob:
+			err = handleMessageBlob(msg.GetBlob(), dataM)
+		case *pbf.ProcessResponse_Log:
+			l := msg.GetLog()
+			select {
+			case <-doneC:
 				break out
+			case logC <- Log{
+				Out: l.Log,
+			}:
 			}
-		} else {
-			delete(dataM, msg.Extenstion)
-			writer.Close()
+		default:
+			err = errors.New("unknown message")
+		}
+		if err != nil {
+			break out
 		}
 
 	}
@@ -251,4 +274,34 @@ out:
 	}
 	log.Printf("1 - finished manager: %s and %d", err, len(dataM))
 	return err
+}
+
+func handleMessageBlob(
+	msg *pbf.TargetBlob,
+	dataM map[string]io.WriteCloser,
+) error {
+	var err error
+	if msg.Data == nil {
+		msg.Data = []byte{}
+	}
+	writer, present := dataM[msg.Extension]
+	if !present && 0 < len(msg.Data) {
+		return fmt.Errorf("unknown output extension %s; %d", msg.Extension, len(msg.Data))
+
+	} else if !present {
+		return nil
+	}
+	if 0 < len(msg.Data) {
+		log.Print("client stream - 3")
+		_, err = io.Copy(writer, bytes.NewBuffer(msg.Data))
+		log.Print("client stream - 4")
+		log.Printf("client writing %s %d", msg.Extension, len(msg.Data))
+		if err != nil {
+			return err
+		}
+	} else {
+		delete(dataM, msg.Extension)
+		writer.Close()
+	}
+	return nil
 }

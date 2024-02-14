@@ -46,13 +46,16 @@ func (e external) Process(stream pbf.JobManager_ProcessServer) error {
 	if err != nil {
 		return err
 	}
-
 	tmpDir, err := os.MkdirTemp("/tmp", "blender*")
 	if err != nil {
 		return err
 	}
 	go loopCleanUpDir(ctx, tmpDir)
 
+	err = sendLog(stream, fmt.Sprintf("processed arguments, proceeding to upload target file with extension %s", tMeta.Extension))
+	if err != nil {
+		return err
+	}
 	// TODO: clean up tmpdir
 	sourceFilePath := tmpDir + "/blender." + tMeta.Extension // we need to think of a temporary directory here
 
@@ -63,11 +66,20 @@ func (e external) Process(stream pbf.JobManager_ProcessServer) error {
 	if err != nil {
 		return err
 	}
+	err = sendLog(stream, "upload complete, processing file with Blender and ffmpeg, this may take a while")
+	if err != nil {
+		return err
+	}
+
 	log.Printf("processing blender file")
 	// feed sourceFilePath
 	// do conversions in the work pool
 	// this blocks until we get read file handles from ffmpeg stdout
 	readerList, err := e.manager.SendJob(ctx, sourceFilePath, args.ExtensionList)
+	if err != nil {
+		return err
+	}
+	err = sendLog(stream, "upload complete, beginning file transfer")
 	if err != nil {
 		return err
 	}
@@ -95,14 +107,26 @@ out:
 			}
 			if r.isDone {
 				log.Printf("server finished sending ext %s", r.ext)
-				err = stream.Send(&pbf.ProcessResponse{Extenstion: r.ext, Data: []byte{}})
+				err = sendLog(stream, fmt.Sprintf("server finished sending output file with extension %s; (%d of %d files completed)", r.ext, i+1, len(readerList)))
+				if err != nil {
+					break out
+				}
+				err = stream.Send(&pbf.ProcessResponse{
+					Data: &pbf.ProcessResponse_Blob{
+						Blob: &pbf.TargetBlob{Extension: r.ext, Data: []byte{}},
+					},
+				})
 				if err != nil {
 					break out
 				}
 				i++
 				continue
 			}
-			err = stream.Send(&pbf.ProcessResponse{Extenstion: r.ext, Data: r.data})
+			err = stream.Send(&pbf.ProcessResponse{
+				Data: &pbf.ProcessResponse_Blob{
+					Blob: &pbf.TargetBlob{Extension: r.ext, Data: r.data},
+				},
+			})
 			if err != nil {
 				break out
 			}
@@ -110,9 +134,23 @@ out:
 	}
 
 	log.Printf("exiting process: %s", err)
+	err = sendLog(stream, "file transfer complete")
+	if err != nil {
+		return err
+	}
 	// the worker stops working at this point as it has finished sending us file handles
 
 	return err
+}
+
+func sendLog(stream pbf.JobManager_ProcessServer, logOut string) error {
+	return stream.Send(&pbf.ProcessResponse{
+		Data: &pbf.ProcessResponse_Log{
+			Log: &pbf.Log{
+				Log: logOut,
+			},
+		},
+	})
 }
 
 type readSingle struct {
