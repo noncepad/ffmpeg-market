@@ -2,12 +2,13 @@ package worker
 
 import (
 	"context"
-	"io"
 	"log"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"gitlab.noncepad.com/naomiyoko/ffmpeg-market/converter"
 )
@@ -20,7 +21,7 @@ type Job struct {
 }
 
 type Result struct {
-	Reader []io.ReadCloser // file handle
+	Reader []string // no file handle
 	Err    error
 }
 
@@ -60,15 +61,16 @@ func (sw *simpleWorker) Run(job Job) Result {
 	}
 
 	// Define an array of file handles (Reader)
-	readerList := make([]io.ReadCloser, len(job.Out))
+	readerList := make([]string, len(job.Out))
 	ansC := make(chan *convertResult, len(readerList))
 	// call convert to convert avi (in working dir) to mp4, mkv, gif
 	wg := &sync.WaitGroup{}
 	wg.Add(len(job.Out))
 	ctx, cancel := context.WithCancel(job.Ctx)
 	for i, fileExtension := range job.Out {
-		outFp := filepath.Join(sw.tmp, "tmpout."+strings.TrimPrefix(fileExtension, "."))
-		go loopConvert(ctx, wg, sw.c, i, ansC, sw.intermediaryAviFilePath(), outFp)
+		r := randomString(10)
+		readerList[i] = filepath.Join(sw.tmp, "tmpout"+r+"."+strings.TrimPrefix(fileExtension, "."))
+		go loopConvert(ctx, wg, sw.c, i, ansC, sw.intermediaryAviFilePath(), readerList[i])
 	}
 out:
 	for k := 0; k < len(job.Out); k++ {
@@ -79,20 +81,17 @@ out:
 			break out
 		case cr = <-ansC:
 			if cr.err != nil {
+				err = cr.err
 				break out
 			}
-			outFp := filepath.Join(sw.tmp, "tmpout."+strings.TrimPrefix(job.Out[cr.i], "."))
-			log.Printf("assigning reader cr %d; fp %s; reader %s", cr.i, outFp, cr.r)
-			readerList[cr.i] = cr.r
+			log.Printf("assigning reader cr %d; fp %s", cr.i, readerList[cr.i])
 		}
 	}
 	cancel()
 	wg.Wait()
 	if err != nil {
-		for _, reader := range readerList {
-			if reader != nil {
-				reader.Close()
-			}
+		for _, outFp := range readerList {
+			os.Remove(outFp)
 		}
 		readerList = nil
 	}
@@ -101,7 +100,6 @@ out:
 
 type convertResult struct {
 	i   int
-	r   io.ReadCloser
 	err error
 }
 
@@ -123,8 +121,19 @@ func loopConvert(
 		ansC <- cr
 		return
 	}
-	cr.r, cr.err = os.Open(outFp)
 	ansC <- cr
+}
+
+func randomString(length int) string {
+	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	seededRand := rand.New(rand.NewSource(time.Now().UnixNano()))
+
+	b := make([]byte, length)
+	for i := range b {
+		b[i] = charset[seededRand.Intn(len(charset))]
+	}
+
+	return string(b)
 }
 
 func (sw *simpleWorker) CloseSignal() <-chan error {

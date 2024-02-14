@@ -7,7 +7,6 @@ import (
 	"io"
 	"log"
 	"os"
-	"sync"
 
 	pbf "gitlab.noncepad.com/naomiyoko/ffmpeg-market/proto/ffmpeg"
 	"google.golang.org/grpc"
@@ -75,51 +74,116 @@ func (e external) Process(stream pbf.JobManager_ProcessServer) error {
 	// check correspondence
 	if len(args.ExtensionList) != len(readerList) {
 		for _, v := range readerList {
-			if v != nil {
-				v.Close()
-			}
+			os.Remove(v)
 		}
 		return fmt.Errorf("expected reader list of length %d but got length %d", len(args.ExtensionList), len(readerList))
 	}
-
-	/*
-			message ProcessResponse{
-		    string extenstion=1;
-		    bytes data=2;
-		}
-	*/
-	errorC := make(chan error, len(args.ExtensionList))
-	writeList := make([]*writeStream, len(readerList))
-	// there is a one to one correspondence between args.ExtensionList and readerList
-	for i, ext := range args.ExtensionList {
-		writeList[i] = &writeStream{done: false, i: 0, ext: ext, stream: stream, m: &sync.Mutex{}}
-		// read stdout from the ffmpeg process in manager, and send the data to the customer
-		go loopProcessWrite(errorC, readerList[i], writeList[i], ext)
+	outC := make(chan *readSingle, 100)
+	for i, outFp := range readerList {
+		go loopRead(ctx, outFp, outC, args.ExtensionList[i])
 	}
 
-	log.Print("entering process errorC loop")
+	i := 0
 out:
-	// wait until the 1+n go routines above finish
-	for i := 0; i < len(args.ExtensionList); i++ {
+	for i < len(readerList) {
 		select {
 		case <-doneC:
-			return ctx.Err()
-		case err = <-errorC:
+			break out
+		case r := <-outC:
+			if r.err != nil {
+				break out
+			}
+			if r.isDone {
+				log.Printf("server finished sending ext %s", r.ext)
+				err = stream.Send(&pbf.ProcessResponse{Extenstion: r.ext, Data: []byte{}})
+				if err != nil {
+					break out
+				}
+				i++
+				continue
+			}
+			err = stream.Send(&pbf.ProcessResponse{Extenstion: r.ext, Data: r.data})
 			if err != nil {
 				break out
 			}
 		}
 	}
-	log.Print("exited processs errorC loop")
-	for _, v := range readerList {
-		if v != nil {
-			v.Close()
-		}
-	}
+
 	log.Printf("exiting process: %s", err)
 	// the worker stops working at this point as it has finished sending us file handles
 
 	return err
+}
+
+type readSingle struct {
+	ext    string
+	err    error
+	data   []byte
+	isDone bool
+}
+
+func loopRead(
+	ctx context.Context,
+	outFp string,
+	outC chan<- *readSingle,
+	ext string,
+) {
+	doneC := ctx.Done()
+	defer os.Remove(outFp)
+	reader, err := os.Open(outFp)
+	if err != nil {
+		select {
+		case <-doneC:
+		case outC <- &readSingle{
+			ext:    ext,
+			err:    err,
+			isDone: true,
+		}:
+		}
+		return
+	}
+	defer reader.Close()
+	isDone := false
+	var n int
+	buf := make([]byte, 2048*16)
+out:
+	for {
+		n, err = reader.Read(buf)
+		if err == io.EOF {
+			err = nil
+			break out
+		} else if err != nil {
+			break out
+		}
+		d := make([]byte, n)
+		copy(d, buf[0:n])
+		log.Printf("1 - writing resp %s %d", ext, len(d))
+		select {
+		case <-doneC:
+			isDone = true
+			break out
+		case outC <- &readSingle{
+			err:    err,
+			data:   d,
+			ext:    ext,
+			isDone: false,
+		}:
+		}
+		log.Printf("2 - writing resp %s %d", ext, len(d))
+	}
+	if !isDone {
+		select {
+		case <-doneC:
+		case outC <- &readSingle{
+			ext:    ext,
+			err:    err,
+			isDone: true,
+		}:
+		}
+	}
+
+	log.Printf("server completed write %s: %s", ext, err)
+
 }
 
 // routine that reads everything (1 stream)
@@ -140,60 +204,6 @@ func readProcess(
 		return fmt.Errorf("error creating named pipe - 3: %s", err)
 	}
 	return nil
-}
-
-func loopProcessWrite(
-	errorC chan<- error,
-	reader io.Reader,
-	writer io.Writer,
-	ext string,
-) {
-	if reader == nil {
-		//writer.Close()
-		errorC <- fmt.Errorf("no reader %s", ext)
-		return
-	}
-	log.Printf("1 - writing done (ext %s)", ext)
-	_, err := io.Copy(writer, reader)
-	// we must inform the Process function when we finish our task
-	//writer.Close()
-	errorC <- err
-	log.Printf("2 - writing done (ext %s): %s", ext, err)
-}
-
-// implements io.Writer interface
-type writeStream struct {
-	m      *sync.Mutex
-	ext    string
-	i      int
-	done   bool
-	stream pbf.JobManager_ProcessServer
-}
-
-// the data in already in p []byte; we need to Send via stream
-// n is the number of bytes in the array
-func (ws *writeStream) Write(p []byte) (n int, err error) {
-	resp := new(pbf.ProcessResponse)
-	resp.Extenstion = ws.ext
-	resp.Data = make([]byte, len(p))
-	n = copy(resp.Data, p)
-	ws.i += n
-	ws.m.Lock()
-	if n == 0 && ws.done {
-		ws.m.Unlock()
-		err = errors.New("already closed")
-		return
-	} else if n == 0 {
-		err = io.EOF
-		ws.done = true
-	}
-	ws.m.Unlock()
-	log.Printf("1 - server write (ext %s) stdout %d: %s", ws.ext, ws.i, err)
-	err = ws.stream.Send(resp)
-
-	//n = len(resp.Data)
-	log.Printf("2 - server write (ext %s) stdout %d: %s", ws.ext, ws.i, err)
-	return
 }
 
 // TODO: sanitize args

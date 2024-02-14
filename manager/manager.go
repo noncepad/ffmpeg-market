@@ -3,7 +3,6 @@ package manager
 import (
 	"context"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"os"
@@ -170,7 +169,7 @@ func (m Manager) SendJob(
 	ctx context.Context,
 	Blender string,
 	Out []string,
-) ([]io.ReadCloser, error) {
+) ([]string, error) {
 	ResultC := make(chan worker.Result)
 	job := worker.Job{
 		Ctx:     ctx,     //context.Context
