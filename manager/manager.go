@@ -3,12 +3,14 @@ package manager
 import (
 	"context"
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"strconv"
 
+	poolmgr "github.com/noncepad/worker-pool/manager"
+	pool "github.com/noncepad/worker-pool/pool"
 	"gitlab.noncepad.com/naomiyoko/ffmpeg-market/converter"
+	pbf "gitlab.noncepad.com/naomiyoko/ffmpeg-market/proto/ffmpeg"
 	"gitlab.noncepad.com/naomiyoko/ffmpeg-market/worker"
 	"google.golang.org/grpc"
 )
@@ -19,6 +21,11 @@ type Configuration struct {
 	BinBlender string
 	ListenUrl  string
 	MaxJobs    int
+}
+
+func (conf *Configuration) Copy() *Configuration {
+	x := *conf
+	return &x
 }
 
 func (conf *Configuration) Check() error {
@@ -47,7 +54,7 @@ func (conf *Configuration) Check() error {
 	}
 	return nil
 }
-func DefaultCreateWorker(ctx context.Context, conf *Configuration, i int) (worker.Worker, error) {
+func DefaultCreateWorker(ctx context.Context, conf *Configuration, i int) (pool.Worker[worker.Request, worker.Result], error) {
 	converterConfig := &converter.Configuration{
 		BinFfmpeg:  conf.BinFfmpeg,
 		BinBlender: conf.BinBlender,
@@ -65,18 +72,15 @@ func DefaultCreateWorker(ctx context.Context, conf *Configuration, i int) (worke
 	return wrkr, nil
 }
 
-// i is unique to each worker
-type WorkerCallback func(ctx context.Context, conf *Configuration, i int) (worker.Worker, error)
-
-type Manager struct {
-	ctx    context.Context
-	cancel context.CancelFunc
-	jobC   chan<- worker.Job
-}
-
 // run a manager that listens on a grpc url
 func Run(ctx context.Context, binFfmpeg string, binBlender string, args []string) error {
+
 	maxJobs, err := strconv.Atoi(args[2])
+	if err != nil {
+		return err
+	}
+
+	manager, err := poolmgr.Create[worker.Request, worker.Result](ctx, maxJobs)
 	if err != nil {
 		return err
 	}
@@ -92,71 +96,32 @@ func Run(ctx context.Context, binFfmpeg string, binBlender string, args []string
 	if err != nil {
 		return err
 	}
+
+	for i := 0; i < maxJobs; i++ {
+
+		w, err := DefaultCreateWorker(ctx, config, i)
+		if err != nil {
+			manager.Close()
+			return err
+		}
+		err = manager.Add(w)
+		if err != nil {
+			manager.Close()
+			return err
+		}
+	}
+
 	l, err := net.Listen("tcp", config.ListenUrl)
 	if err != nil {
 		return err
 	}
 
-	manager, err := Create(ctx, config, DefaultCreateWorker)
-	if err != nil {
-		return err
-	}
 	s := grpc.NewServer()
-	manager.Add(s)
 
+	pbf.RegisterJobManagerServer(s, external{manager: manager})
 	//TODO: Add go routine to close listener
 	go loopClose(ctx, l, s)
 	return s.Serve(l)
-}
-
-func Create(parentCtx context.Context, conf *Configuration, workerCb WorkerCallback) (Manager, error) {
-	ctx, cancel := context.WithCancel(parentCtx)
-	// no buffer so program will block if failsc
-	// how many jobs do you want in the buffer? for now no buffer
-	jobC := make(chan worker.Job, 1)
-	// creating worker pool
-	n := conf.MaxJobs
-	for i := 0; i < n; i++ {
-		w, err := workerCb(ctx, conf, i)
-		if err != nil {
-			cancel()
-			return Manager{}, fmt.Errorf("failed to create worker: %s", err)
-		} else {
-			log.Printf("worker created successfully")
-		}
-		go loopDoJob(w, jobC, cancel)
-	}
-	return Manager{
-		ctx:    ctx,
-		cancel: cancel,
-		jobC:   jobC,
-	}, nil
-
-}
-
-// jobC is a read only channel
-// whenever you have a cancel, do defer cancel
-// this function will block forever until the program dies
-func loopDoJob(w worker.Worker, jobC <-chan worker.Job, cancel context.CancelFunc) {
-	defer cancel()
-	var job worker.Job
-	var err error
-	signalC := w.CloseSignal()
-out:
-	for {
-		select {
-		// we read from signalC and get an error and put t in the err variable
-		case err = <-signalC:
-
-			break out
-		// we read from jobC and get a job and put it in the job variable
-		case job = <-jobC:
-			result := w.Run(job)
-			// ResultC always has a buffer of 1, we will not block
-			job.ResultC <- result
-		}
-	}
-	log.Printf("closing loop: %s", err)
 }
 
 func loopClose(ctx context.Context, listner net.Listener, s *grpc.Server) {
@@ -167,42 +132,6 @@ func loopClose(ctx context.Context, listner net.Listener, s *grpc.Server) {
 
 type clientLogger interface {
 	Send(string)
-}
-
-func (m Manager) SendJob(
-	ctx context.Context,
-	Blender string,
-	Out []string,
-) ([]string, error) {
-	ResultC := make(chan worker.Result)
-	job := worker.Job{
-		Ctx:     ctx,     //context.Context
-		Blender: Blender, //string   // filepath
-		Out:     Out,     //[]string // list of file extensions
-		ResultC: ResultC, //chan<- Result
-	}
-	select {
-	case m.jobC <- job:
-		// Job was successfully sent to channel
-	case <-m.ctx.Done():
-		// The manager's context has been cancelled, return an error
-		return nil, m.ctx.Err()
-	case <-job.Ctx.Done():
-		// The job's context was been cancelled, return an error
-		return nil, job.Ctx.Err()
-	}
-	select {
-	case result := <-ResultC:
-		// Job was successfully sent to channel
-		return result.Reader, result.Err
-	case <-m.ctx.Done():
-		// The manager's context has been cancelled, return an error
-		return nil, m.ctx.Err()
-	case <-job.Ctx.Done():
-		// The job's context was been cancelled, return an error
-		return nil, job.Ctx.Err()
-
-	}
 }
 
 // Check if executables (blender and ffmpeg) exist and are executable

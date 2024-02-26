@@ -8,13 +8,14 @@ import (
 	"log"
 	"os"
 
+	"github.com/noncepad/worker-pool/pool"
 	pbf "gitlab.noncepad.com/naomiyoko/ffmpeg-market/proto/ffmpeg"
-	"google.golang.org/grpc"
+	"gitlab.noncepad.com/naomiyoko/ffmpeg-market/worker"
 )
 
 type external struct {
 	pbf.UnimplementedJobManagerServer
-	manager Manager
+	manager pool.Manager[worker.Request, worker.Result]
 }
 
 func (e external) Process(stream pbf.JobManager_ProcessServer) error {
@@ -68,29 +69,34 @@ func (e external) Process(stream pbf.JobManager_ProcessServer) error {
 	// feed sourceFilePath
 	// do conversions in the work pool
 	// this blocks until we get read file handles from ffmpeg stdout
-	readerList, err := e.manager.SendJob(ctx, sourceFilePath, args.ExtensionList)
+	result, err := e.manager.Submit(ctx, worker.Request{
+		Blender: sourceFilePath,
+		Out:     args.ExtensionList,
+	})
 	if err != nil {
 		return err
 	}
+
 	err = sendLog(stream, "upload complete, beginning file transfer")
 	if err != nil {
 		return err
 	}
 	// check correspondence
-	if len(args.ExtensionList) != len(readerList) {
-		for _, v := range readerList {
+
+	if len(args.ExtensionList) != len(result.Reader) {
+		for _, v := range result.Reader {
 			os.Remove(v)
 		}
-		return fmt.Errorf("expected reader list of length %d but got length %d", len(args.ExtensionList), len(readerList))
+		return fmt.Errorf("expected reader list of length %d but got length %d", len(args.ExtensionList), len(result.Reader))
 	}
 	outC := make(chan *readSingle, 100)
-	for i, outFp := range readerList {
+	for i, outFp := range result.Reader {
 		go loopRead(ctx, outFp, outC, args.ExtensionList[i])
 	}
 
 	i := 0
 out:
-	for i < len(readerList) {
+	for i < len(result.Reader) {
 		select {
 		case <-doneC:
 			break out
@@ -100,7 +106,7 @@ out:
 			}
 			if r.isDone {
 				log.Printf("server finished sending ext %s", r.ext)
-				err = sendLog(stream, fmt.Sprintf("server finished sending output file with extension %s; (%d of %d files completed)", r.ext, i+1, len(readerList)))
+				err = sendLog(stream, fmt.Sprintf("server finished sending output file with extension %s; (%d of %d files completed)", r.ext, i+1, len(result.Reader)))
 				if err != nil {
 					break out
 				}
@@ -370,14 +376,6 @@ func (rs *readStream) Read(p []byte) (n int, err error) {
 	}
 	log.Printf("rs.i %d", rs.i)
 	return
-}
-
-// Create a grpc endpoint
-func (m Manager) Add(s *grpc.Server) {
-	e1 := external{
-		manager: m,
-	}
-	pbf.RegisterJobManagerServer(s, e1)
 }
 
 // when the request is finished, clean up with this function
