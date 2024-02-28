@@ -7,27 +7,30 @@ import (
 	"os"
 	"strconv"
 
+	"github.com/noncepad/ffmpeg-market/converter"
+	pbf "github.com/noncepad/ffmpeg-market/proto/ffmpeg"
+	"github.com/noncepad/ffmpeg-market/worker"
 	poolmgr "github.com/noncepad/worker-pool/manager"
 	pool "github.com/noncepad/worker-pool/pool"
-	"gitlab.noncepad.com/naomiyoko/ffmpeg-market/converter"
-	pbf "gitlab.noncepad.com/naomiyoko/ffmpeg-market/proto/ffmpeg"
-	"gitlab.noncepad.com/naomiyoko/ffmpeg-market/worker"
 	"google.golang.org/grpc"
 )
 
+// Settings required for the manager to operate.
 type Configuration struct {
-	DirWork    string
-	BinFfmpeg  string
-	BinBlender string
-	ListenUrl  string
-	MaxJobs    int
+	DirWork    string // Directory for work files/temporary files.
+	BinFfmpeg  string // Binary location for ffmpeg.
+	BinBlender string // Binary location for Blender.
+	ListenUrl  string // URL on which to listen for incoming gRPC connections.
+	MaxJobs    int    // Maximum number of concurrent jobs/workers.
 }
 
+// Returns a copy of the Configuration object.
 func (conf *Configuration) Copy() *Configuration {
 	x := *conf
 	return &x
 }
 
+// Checks if configuration properties are set and correctly
 func (conf *Configuration) Check() error {
 	if conf.DirWork == "" {
 		return fmt.Errorf("DirWork not set")
@@ -54,17 +57,19 @@ func (conf *Configuration) Check() error {
 	}
 	return nil
 }
+
+// Creates instance of worker
 func DefaultCreateWorker(ctx context.Context, conf *Configuration, i int) (pool.Worker[worker.Request, worker.Result], error) {
 	converterConfig := &converter.Configuration{
 		BinFfmpeg:  conf.BinFfmpeg,
 		BinBlender: conf.BinBlender,
 	}
-
+	// Creates a new converter based on the passed context and converter configuration.
 	conv, err := converter.CreateSimpleConverter(ctx, converterConfig)
 	if err != nil {
 		return nil, err
 	}
-	// tmp directory = parent directory plus unique identifier for worker
+	// Sets up a tmp directory = parent directory plus unique identifier for worker
 	wrkr, err := worker.Create(ctx, conv, fmt.Sprintf("%s/worker_%d", conf.DirWork, i))
 	if err != nil {
 		return nil, err
@@ -72,18 +77,19 @@ func DefaultCreateWorker(ctx context.Context, conf *Configuration, i int) (pool.
 	return wrkr, nil
 }
 
-// run a manager that listens on a grpc url
+// Sets up the gRPC manager and starts listening for incoming connections.
 func Run(ctx context.Context, binFfmpeg string, binBlender string, args []string) error {
-
+	// Parse the maximum number of jobs from the command line arguments.
 	maxJobs, err := strconv.Atoi(args[2])
 	if err != nil {
 		return err
 	}
-
+	// Create a new manager for handling jobs with the parsed number of maxJobs.
 	manager, err := poolmgr.Create[worker.Request, worker.Result](ctx, maxJobs)
 	if err != nil {
 		return err
 	}
+	// Set up configuration based on passed arguments and binaries.
 	config := &Configuration{
 		DirWork:    args[0],
 		BinFfmpeg:  binFfmpeg,
@@ -91,14 +97,13 @@ func Run(ctx context.Context, binFfmpeg string, binBlender string, args []string
 		ListenUrl:  args[1],
 		MaxJobs:    maxJobs,
 	}
-
+	// Check for correct configuration parameters
 	err = config.Check()
 	if err != nil {
 		return err
 	}
-
+	// For each job, instantiate a worker and add it to the manager.
 	for i := 0; i < maxJobs; i++ {
-
 		w, err := DefaultCreateWorker(ctx, config, i)
 		if err != nil {
 			manager.Close()
@@ -110,20 +115,22 @@ func Run(ctx context.Context, binFfmpeg string, binBlender string, args []string
 			return err
 		}
 	}
-
+	// Start listening on TCP based on the configured ListenUrl.
 	l, err := net.Listen("tcp", config.ListenUrl)
 	if err != nil {
 		return err
 	}
 
-	s := grpc.NewServer()
-
+	s := grpc.NewServer() // Create a new gRPC server instance.
+	// Register the JobManagerServer service with the manager
 	pbf.RegisterJobManagerServer(s, external{manager: manager})
-	//TODO: Add go routine to close listener
-	go loopClose(ctx, l, s)
-	return s.Serve(l)
+	go loopClose(ctx, l, s) //go routine to close listener
+
+	return s.Serve(l) // Serve the gRPC server on the established listener.
+
 }
 
+// Wait for cancellation and then stops the server and closes the listener.
 func loopClose(ctx context.Context, listner net.Listener, s *grpc.Server) {
 	<-ctx.Done()
 	s.GracefulStop()

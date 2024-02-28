@@ -1,4 +1,4 @@
-module gitlab.noncepad.com/naomiyoko/ffmpeg-market
+module github.com/noncepad/ffmpeg-market
 
 go 1.21.6
 

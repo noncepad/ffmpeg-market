@@ -8,9 +8,9 @@ import (
 	"log"
 	"os"
 
+	pbf "github.com/noncepad/ffmpeg-market/proto/ffmpeg"
+	"github.com/noncepad/ffmpeg-market/worker"
 	"github.com/noncepad/worker-pool/pool"
-	pbf "gitlab.noncepad.com/naomiyoko/ffmpeg-market/proto/ffmpeg"
-	"gitlab.noncepad.com/naomiyoko/ffmpeg-market/worker"
 )
 
 type external struct {
@@ -18,12 +18,8 @@ type external struct {
 	manager pool.Manager[worker.Request, worker.Result]
 }
 
+// Downloads blender from the customer and uploads converted files back to the customer
 func (e external) Process(stream pbf.JobManager_ProcessServer) error {
-	ctx3 := stream.Context()
-	go func() {
-		<-ctx3.Done()
-		log.Print("stream context canceled")
-	}()
 	ctx, cancel := context.WithCancel(stream.Context())
 	doneC := ctx.Done()
 	defer cancel()
@@ -39,36 +35,35 @@ func (e external) Process(stream pbf.JobManager_ProcessServer) error {
 	if err != nil {
 		return err
 	}
-
+	// make a tmp directory
 	tmpDir, err := os.MkdirTemp("/tmp", "blender*")
 	if err != nil {
 		return err
 	}
-	go loopCleanUpDir(ctx, tmpDir)
+	go loopCleanUpDir(ctx, tmpDir) // go routine to clean up temporary files
 
+	// log progress for customer
 	err = sendLog(stream, fmt.Sprintf("processed arguments, proceeding to upload target file with extension %s", tMeta.Extension))
 	if err != nil {
 		return err
 	}
-	// TODO: clean up tmpdir
-	sourceFilePath := tmpDir + "/blender." + tMeta.Extension // we need to think of a temporary directory here
 
-	// we need to read in the blender file (only TargetBlob)
-	// 1 error for go routine we spawn here
+	sourceFilePath := tmpDir + "/blender." + tMeta.Extension
+
 	log.Printf("receiving blender file")
+	// fake an io.reader and download the file from the customer
 	err = readProcess(ctx, &readStream{stream: stream, i: 0, total: tMeta.Size}, sourceFilePath)
 	if err != nil {
 		return err
 	}
+	// log progress for customer
 	err = sendLog(stream, "upload complete, processing file with Blender and ffmpeg, this may take a while")
 	if err != nil {
 		return err
 	}
 
 	log.Printf("processing blender file")
-	// feed sourceFilePath
-	// do conversions in the work pool
-	// this blocks until we get read file handles from ffmpeg stdout
+	// submit job to the worker pool, this blocks till job is completed
 	result, err := e.manager.Submit(ctx, worker.Request{
 		Blender: sourceFilePath,
 		Out:     args.ExtensionList,
@@ -76,13 +71,12 @@ func (e external) Process(stream pbf.JobManager_ProcessServer) error {
 	if err != nil {
 		return err
 	}
-
+	// log progress for customer
 	err = sendLog(stream, "upload complete, beginning file transfer")
 	if err != nil {
 		return err
 	}
-	// check correspondence
-
+	// check if length of extension list is as expected
 	if len(args.ExtensionList) != len(result.Reader) {
 		for _, v := range result.Reader {
 			os.Remove(v)
@@ -91,7 +85,7 @@ func (e external) Process(stream pbf.JobManager_ProcessServer) error {
 	}
 	outC := make(chan *readSingle, 100)
 	for i, outFp := range result.Reader {
-		go loopRead(ctx, outFp, outC, args.ExtensionList[i])
+		go loopRead(ctx, outFp, outC, args.ExtensionList[i]) // reads converted files and sends to channel outC
 	}
 
 	i := 0
@@ -100,11 +94,11 @@ out:
 		select {
 		case <-doneC:
 			break out
-		case r := <-outC:
+		case r := <-outC: // recieve file chunks from loopRead go routine (1 per file extension)
 			if r.err != nil {
 				break out
 			}
-			if r.isDone {
+			if r.isDone { // for a single file we get and EOF (end of file) and inform customer for file extentsion r.ext
 				log.Printf("server finished sending ext %s", r.ext)
 				err = sendLog(stream, fmt.Sprintf("server finished sending output file with extension %s; (%d of %d files completed)", r.ext, i+1, len(result.Reader)))
 				if err != nil {
@@ -112,7 +106,7 @@ out:
 				}
 				err = stream.Send(&pbf.ProcessResponse{
 					Data: &pbf.ProcessResponse_Blob{
-						Blob: &pbf.TargetBlob{Extension: r.ext, Data: []byte{}},
+						Blob: &pbf.TargetBlob{Extension: r.ext, Data: []byte{}}, // when customer recieves empty byte array it is an EOF
 					},
 				})
 				if err != nil {
