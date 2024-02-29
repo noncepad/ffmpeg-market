@@ -1,6 +1,6 @@
 # FFmpeg-market
 
-FFmpeg-Converter is an API built to convert Blender files (.blend) into various video formats. This project utilizes a wrapper around FFMpeg in Go, enabling an efficient conversion process.
+FFmpeg-Converter is server built to convert Blender files (.blend) into various video formats. This project utilizes a wrapper around FFMpeg in Go, enabling an efficient conversion process.
 
 For details visit [noncepad.com](https://noncepad.com/blog/ffmpeg/)
 
