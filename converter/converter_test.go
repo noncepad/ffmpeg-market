@@ -8,7 +8,7 @@ import (
 
 func TestFfmpegConverter(t *testing.T) {
 	// Input and output file paths
-	inputFilePath := "./files/input.mp4"
+	inputFilePath := "./files/solpipe.mp4"
 	outputFilePath := "./files/output.gif"
 
 	// FFmpeg command

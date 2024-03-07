@@ -13,7 +13,7 @@ import (
 )
 
 // if you dont set the filepaths as enviromnetal variables this func will lookup executable in the PATH
-// ./server <myworkingdirectory> <listenurl for grpc> <MaxJobs>
+// ./ffmpeg-server <myworkingdirectory> <listenurl for grpc> <MaxJobs>
 func main() {
 	// Set up channel to listen for interrupt or termination signals
 	signalC := make(chan os.Signal, 1)

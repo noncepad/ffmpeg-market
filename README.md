@@ -19,6 +19,21 @@ For details visit [noncepad.com](https://noncepad.com/blog/ffmpeg/)
 To utilize the FFmpeg-Converter API, ensure that you have Blender installed and accessible in your environment. Clients can make requests by uploading .blend files along with the extension list for desired output formats and the directory to store the converted files.
 
 # Build
-
-
+Server:
+```bash
+go build -o ./ffmpeg-server github.com/noncepad/ffmpeg-market/cmd/server
+```
+Client:
+```bash
+go build -o ./ffmpeg-client github.com/noncepad/ffmpeg-market/cmd/client
+```
 # Run
+
+Server:
+```bash
+./ffmpeg-server <myworkingdirectory> <listenurl for grpc> <MaxJobs>
+```
+Client:
+```bash
+./ffmpeg-client <serverURL> <filepathIn> <DirectoryOut> <extesion1> <extesion2> .... <extesionN>
+```

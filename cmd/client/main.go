@@ -11,7 +11,7 @@ import (
 	"github.com/noncepad/ffmpeg-market/client"
 )
 
-// ./client <serverURL> <filepathIn> <DirectoryOut> <extesion1> <extesion2> .... <extesionN>
+// ./ffmpeg-client <serverURL> <filepathIn> <DirectoryOut> <extesion1> <extesion2> .... <extesionN>
 func main() {
 	// Set up channel to listen for interrupt or termination signals
 	signalC := make(chan os.Signal, 1)
