@@ -37,3 +37,14 @@ Client:
 ```bash
 ./ffmpeg-client <serverURL> <filepathIn> <DirectoryOut> <extesion1> <extesion2> .... <extesionN>
 ```
+
+## Example Arguments
+
+Server:
+```bash
+./ffmpeg-server . localhost:8080 8 
+```
+Client:
+```bash
+./ffmpeg-client localhose :8080 ./video.blend . gif mp4
+```
