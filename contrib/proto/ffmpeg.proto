@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package ffmpeg;
 
-option go_package = "gitlab.noncepad.com/naomiyoko/ffmpeg-market/proto/ffmpeg";
+option go_package = "github.com/noncepad/ffmpeg-market/proto/ffmpeg";
 
 // Result message used to send error if occurred.
 message Result {
@@ -28,10 +28,12 @@ message ProcessRequest{
   }
 }
 
+// for processing what video formats to convert to
 message ProcessArgs{
   repeated string extension_list = 1;
 }
 
+// for readings the size of the file being uploaded
 message TargetMeta{
     uint64 size = 1;
     string extension = 2;

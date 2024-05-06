@@ -7,34 +7,39 @@ import (
 	"sync"
 	"time"
 
+	"github.com/noncepad/ffmpeg-market/converter"
 	"github.com/noncepad/worker-pool/pool"
 	log "github.com/sirupsen/logrus"
-	"gitlab.noncepad.com/naomiyoko/ffmpeg-market/converter"
 )
 
+// Request specifies the structure for job requests
 type Request struct {
 	Blender string
 	Out     []string
 }
 
+// Job wraps the details necessary to process a single task.
 type Job struct {
-	Ctx     context.Context
-	Blender string   // filepath
-	Out     []string // list of file extensions
-	ResultC chan<- Result
+	Ctx     context.Context // The context for the job, allowing cancellation signal handling.
+	Blender string          // Path to the Blender file to be processed.
+	Out     []string        // List of desired output file formats.
+	ResultC chan<- Result   // Channel to send the result back to the requester.
 }
 
+// Holds a list of strings representing files.
 type Result struct {
-	Reader []string // no file handle
+	Reader []string // Contains file paths of converted files (no file handles are included).
 }
 
+// Implementation of a worker capable of processing Jobs.
 type simpleWorker struct {
-	ctx    context.Context
-	cancel context.CancelFunc
-	c      converter.Converter
-	tmp    string //directory
+	ctx    context.Context     // context for cancellation
+	cancel context.CancelFunc  // call when cancelling the worker
+	c      converter.Converter // The video conversion interface
+	tmp    string              // Directory for temporary files
 }
 
+// Creates instance of a new simpleWorker with temporary directory.
 // the tmp directory (tmp) must already exist and be exclusive to the worker
 func Create(parentCtx context.Context, c converter.Converter, dirTmp string) (pool.Worker[Request, Result], error) {
 	os.MkdirAll(dirTmp, 0755)
@@ -45,30 +50,37 @@ func Create(parentCtx context.Context, c converter.Converter, dirTmp string) (po
 	return e1, nil
 }
 
+// Terminate the worker by cancelling its context
 func (sw *simpleWorker) Close() error {
 	sw.cancel()
 	return sw.ctx.Err()
 }
+
+// When context is cancelled indicates and error with LoopError
 func (sw *simpleWorker) CloseSignal() <-chan error {
 	signalC := make(chan error, 1)
 	go loopError(sw.ctx, signalC)
 	return signalC
 }
 
+// Listens for the context's done signal and relays the context's error to the provided channel.
 func loopError(ctx context.Context, errorC chan<- error) {
 	<-ctx.Done()
 	errorC <- ctx.Err()
 }
 
+// Generates the path to the intermediary, tmp AVI file used during conversion.
 func (sw *simpleWorker) intermediaryAviFilePath() string {
 	return sw.tmp + "/blah.avi"
 }
 
+// Used to pass around results from the conversion go routine.
 type convertResult struct {
 	i   int
 	err error
 }
 
+// loopConvert calls convert and sends the result over a channel.
 func loopConvert(
 	ctx context.Context,
 	wg *sync.WaitGroup,
@@ -92,6 +104,7 @@ func loopConvert(
 	ansC <- cr
 }
 
+// randomString generates a random string of a specified length
 func randomString(length int) string {
 	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	seededRand := rand.New(rand.NewSource(time.Now().UnixNano()))

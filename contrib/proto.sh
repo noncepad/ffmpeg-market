@@ -20,8 +20,8 @@ build_go(){
     rm -r $PROTO_GO_DIR 2>>/dev/null || true
     $PROTO_BIN --experimental_allow_proto3_optional --proto_path=${PROTO_DIR} --go-grpc_out=. --go_out=. $@
     #proto/basic.proto proto/serum.proto proto/solana-net.proto
-    mv "gitlab.noncepad.com/naomiyoko/ffmpeg-market/proto" ./
-    rm -r gitlab.noncepad.com
+    mv "github.com/noncepad/ffmpeg-market/proto" ./
+    rm -r github.com
 }
 
 

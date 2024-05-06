@@ -8,14 +8,16 @@ import (
 	"io"
 	"log"
 
-	pbf "gitlab.noncepad.com/naomiyoko/ffmpeg-market/proto/ffmpeg"
+	pbf "github.com/noncepad/ffmpeg-market/proto/ffmpeg"
 )
 
+// writeStream send data via gRPC stream.
 type writeStream struct {
 	i      int
 	stream pbf.JobManager_ProcessClient
 }
 
+// Writes byte array to Server
 func (ws writeStream) Write(p []byte) (n int, err error) {
 	log.Printf("write - %d", len(p))
 
@@ -30,6 +32,7 @@ func (ws writeStream) Write(p []byte) (n int, err error) {
 	return
 }
 
+// handleStream manages the incoming data from a gRPC stream.
 func handleStream(
 	ctx context.Context,
 	cancel context.CancelCauseFunc,
@@ -72,6 +75,7 @@ out:
 		}
 
 	}
+	// Close all writer instances after processing is done or an error occurs.
 	for ext, writer := range dataM {
 		// do EOF to file handles
 		log.Printf("sending EOF to %s", ext)

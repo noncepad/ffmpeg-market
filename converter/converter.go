@@ -11,22 +11,25 @@ import (
 	"strings"
 )
 
+// Define methods for converting files using ffmpeg and blender executables
 type Converter interface {
-	// takes an mp4 inputfile and converts it to a gif output file
 	Convert(ctx context.Context, inputFile string, outFp string) error
 	Render(ctx context.Context, inputFile, outputFile string) error
 }
 
+// Implements the Converter interface
 type simpleConverter struct {
 	ctx    context.Context
 	config *Configuration
 }
 
+// Hold paths to external tools needed by simpleConverter.
 type Configuration struct {
 	BinFfmpeg  string
 	BinBlender string
 }
 
+// Creates an instance of simpleConverter
 func CreateSimpleConverter(ctx context.Context, config *Configuration) (Converter, error) {
 	e1 := new(simpleConverter)
 	e1.ctx = ctx
@@ -34,16 +37,9 @@ func CreateSimpleConverter(ctx context.Context, config *Configuration) (Converte
 	return e1, nil
 }
 
-// we need to put a context variable here
-// the sc.ctx is for the server as a whole.
-// ctx is for the user request.
+// Executes FFmpeg to convert files from an .avi format to another video format
 func (sc *simpleConverter) Convert(ctx context.Context, inputFile string, outFp string) error {
-	// use create to make sure we are not overwriting a file
-	// the command will fail if the output file already exists
-	//saveHandle, stdout := io.Pipe()
-
-	// OLD: ffmpeg -i ./files/solpipe.mkv ./files/solpipe2.gif
-	// new: ffmpeg -i ./files/solpipe.mp4 -f gif pipe:1 > ./files/solpipe5.gif
+	// ffmpeg -i ./files/solpipe.mp4 -f gif pipe:1 > ./files/solpipe5.gif
 	var err error
 	cmd := exec.CommandContext(ctx, sc.config.BinFfmpeg, "-i", inputFile, "-f", strings.TrimPrefix(filepath.Ext(outFp), "."), outFp)
 
@@ -56,10 +52,7 @@ func (sc *simpleConverter) Convert(ctx context.Context, inputFile string, outFp 
 		err = fmt.Errorf("ffmpeg command failed: %v", err)
 		return err
 	}
-	// conversion is complete when we close the PipeReader
-	// let the command execute in the background
-	// use the saveHandle to read stdout from the command while in the foreground
-	//go loopCloseWithError(cmd, saveHandle)
+
 	log.Printf("ffmpeg %s %s successfully started", inputFile, outFp)
 	err = cmd.Wait()
 	log.Printf("ffmpeg ext %s done: %s", outFp, err)
@@ -84,6 +77,7 @@ func loopCloseWithError(
 	}
 }
 
+// Executes Blender to convert files from .blend format to an avi. format
 func (sc *simpleConverter) Render(ctx context.Context, inputFile, outputFile string) error {
 	// use create to make sure we are not overwriting a file
 	// the command will fail if the output file already exists
@@ -108,5 +102,3 @@ func (sc *simpleConverter) Render(ctx context.Context, inputFile, outputFile str
 	log.Printf("Rendering started: %+v", cmdStr)
 	return cmd.Wait()
 }
-
-// /usr/bin/blender -b ./files/solpipe.blend -o ./files/out.avi -F AVIJPEG -x 1 -f 1 -a
